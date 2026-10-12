@@ -46,7 +46,7 @@ void rr64_hud_widgets_end(unsigned char *);
 void rr64_hud_label_begin(unsigned char *, unsigned);
 void rr64_hud_label_end(unsigned char *);
 void rr64_hud_widgets_clear(unsigned char *);
-void rr64_hud_label_pin_center(unsigned char *, unsigned index, unsigned view);
+void rr64_hud_label_pin_view(unsigned char *, unsigned index, unsigned view);
 void rr64_hud_countdown_begin(unsigned char *);
 void rr64_hud_countdown_end(unsigned char *);
 void rr64_online_private_selection_begin(unsigned char *);

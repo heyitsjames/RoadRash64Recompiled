@@ -152,8 +152,9 @@ extern "C" void rr64_hud_widgets_end(unsigned char *rdram) {
     }
 }
 // A label queued after rr64_hud_widgets_end with a fixed place in a 3/4-player
-// view: keep its authored 4:3 position (centre origin) and clip it to the view.
-extern "C" void rr64_hud_label_pin_center(unsigned char *rdram, unsigned index, unsigned view) {
+// view: anchor it to the view's left edge, as the stock rank labels above are,
+// and clip it to the view.
+extern "C" void rr64_hud_label_pin_view(unsigned char *rdram, unsigned index, unsigned view) {
     if (frame.owner != rdram || frame.views < 3 || view >= frame.views || index < frame.first ||
         index >= text_capacity)
         return;
@@ -163,12 +164,13 @@ extern "C" void rr64_hud_label_pin_center(unsigned char *rdram, unsigned index, 
     const float vw = width / 2, vh = height / 2;
     const unsigned col = view % 2, row = view / 2;
     auto &p = frame.labels[index];
-    p = {512, 0};
+    p = {uint16_t(col ? 512 : 0), 0};
     p.left = uint16_t(col * vw);
     p.top = uint16_t(row * vh);
     p.right = uint16_t((col + 1) * vw);
     p.bottom = uint16_t((row + 1) * vh);
-    p.clip_left_origin = p.clip_right_origin = 512;
+    p.clip_left_origin = col ? 512 : 0;
+    p.clip_right_origin = col ? 1024 : 512;
     p.width = uint16_t(width);
     if (frame.end <= index)
         frame.end = index + 1;

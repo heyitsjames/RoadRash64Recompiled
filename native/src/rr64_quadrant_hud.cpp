@@ -14,7 +14,7 @@
 
 extern "C" void func_8001EB90(unsigned char *, recomp_context *); // Queue HUD sprite.
 extern "C" void func_800795AC(unsigned char *, recomp_context *); // Queue HUD label.
-extern "C" void rr64_hud_label_pin_center(unsigned char *, unsigned index, unsigned view);
+extern "C" void rr64_hud_label_pin_view(unsigned char *, unsigned index, unsigned view);
 
 namespace rr64::quadrant_hud {
 namespace {
@@ -31,9 +31,10 @@ constexpr unsigned sprite_buffer = 0x8009CBA4u, sprite_counts = 0x800BC9D0u;
 constexpr unsigned sprite_pool = 0x800BCAD8u, sprite_capacity = 96, sprite_stride = 76;
 constexpr unsigned label_count = 0x800A76A0u, label_capacity = 64;
 constexpr unsigned dl_cursor = 0x800AC650u, dl_bases = 0x800AC658u, dl_commands = 0x800BC9A0u;
-// Explicit alignment: extended-GBI enable (8) plus SetRectAlign (16), and the
-// SetRectAlign that restores no origin (16).
-constexpr unsigned align_begin_bytes = 24, align_end_bytes = 16;
+// Explicit alignment: extended-GBI enable (8), SetRectAlign (16), scissor push
+// (8), view scissor (16) and SetScissorAlign (24); then the SetRectAlign that
+// restores no origin (16), the scissor pop (8) and the SetScissorAlign reset (24).
+constexpr unsigned align_begin_bytes = 72, align_end_bytes = 48;
 // Bar render state, two bars of four commands, closing mode reset, alignment.
 constexpr unsigned dl_bytes_per_view = (7 + 2 * 4 + 1) * 8 + align_begin_bytes + align_end_bytes;
 // 30220's locals: per-view HUD flags, drawing mask, outgoing call arguments
@@ -49,13 +50,18 @@ constexpr float icon_offset = 32.0f, panel_left = 21.0f;
 // (8 units from the edge, centred 105 units down).
 constexpr float view_units_x = 160.0f, view_units_y = 120.0f;
 constexpr float panel_scale = 0.6f, view_margin = 8.0f, panel_centre_y = 105.0f;
-constexpr unsigned centre_origin = 512, no_origin = 0x800;
+constexpr unsigned no_origin = 0x800;
+// Widescreen split-screen columns fill their half of the window, so a panel
+// follows its view's left edge: the screen's left edge (origin 0) for the left
+// column, the centre line (512) for the right. Matches the stock rank labels.
+constexpr unsigned view_origin(unsigned view) { return view % 2 ? 512 : 0; }
 
 // Sprites this frame's HUD queued, given an explicit alignment when flushed.
 struct Queued {
     unsigned char *owner = nullptr;
     unsigned count = 0;
     std::array<unsigned, 12> records{};
+    std::array<unsigned, 12> views{};
     bool aligned = false;
 };
 Queued queued;
@@ -93,19 +99,47 @@ struct DisplayList {
         cursor += 8;
     }
     // RT64 SetRectAlign, encoded as rr64_hud_widgets does. An explicit origin
-    // also exempts the draw from RT64's automatic race-HUD anchoring; the
-    // centre origin keeps the authored 4:3 position.
+    // also exempts the draw from RT64's automatic race-HUD anchoring, which
+    // would otherwise move only some of the panel's draws.
     void rect_align(unsigned origin, unsigned width) {
         put(0x64000006u, origin | (origin << 12));
         const int origin_x = origin < no_origin ? int(width) * 4 * int(origin) / 1024 : 0;
         const unsigned offset = unsigned(std::uint16_t(-origin_x)) << 16;
         put(offset, offset);
     }
-    void align_begin(unsigned width) {
+    // The draw's scissor needs the same origins as its rect: with none, RT64
+    // keeps the scissor in the centred 4:3 area and clips a panel anchored to
+    // the screen's left edge. Clip to the view, as rr64_hud_widgets does.
+    void align_begin(unsigned width, unsigned height, unsigned view) {
         put(0xE0525464u, 0x10000064u); // Standard RT64 F3DEX2 extended-GBI enable.
-        rect_align(centre_origin, width);
+        rect_align(view_origin(view), width);
+        const unsigned col = view % 2, row = view / 2;
+        const unsigned left_origin = col ? 512 : 0, right_origin = col ? 1024 : 512;
+        const int left = int(col * width / 2) * 4 - int(width) * 4 * int(left_origin) / 1024;
+        const int right = int((col + 1) * width / 2) * 4 - int(width) * 4 * int(right_origin) / 1024;
+        put(0x64000017u, 0); // Push scissor.
+        put(0x64000005u, (left_origin << 2) | (right_origin << 14));
+        put((unsigned(std::uint16_t(left)) << 16) | (row * height / 2 * 4),
+            (unsigned(std::uint16_t(right)) << 16) | ((row + 1) * height / 2 * 4));
+        // The sprite flush can restore its full-screen scissor (ED) inside a
+        // record. Give standard scissors the same origins and clamp them to the
+        // view; bounds are in origin-moved 10.2 units.
+        scissor_align(left_origin, right_origin, col * width / 2 * 4, row * height / 2 * 4,
+                      (col + 1) * width / 2 * 4, (row + 1) * height / 2 * 4);
     }
-    void align_end() { rect_align(no_origin, 0); }
+    void align_end() {
+        rect_align(no_origin, 0);
+        put(0x64000018u, 0); // Pop scissor.
+        // RT64's default: no origins and no clamping. The bound fields are
+        // unsigned 16-bit, and standard scissor values always lie within them.
+        scissor_align(no_origin, no_origin, 0, 0, 0xFFFF, 0xFFFF);
+    }
+    void scissor_align(unsigned left_origin, unsigned right_origin, unsigned left, unsigned top,
+                       unsigned right, unsigned bottom) {
+        put(0x64000008u, left_origin | (right_origin << 12));
+        put(0, 0); // No offsets.
+        put((left << 16) | top, (right << 16) | bottom);
+    }
 };
 
 unsigned coordinate(float value) {
@@ -151,9 +185,9 @@ struct Call {
 };
 
 // One sprite exactly as the stock block queues it (32DD4..32F84), remembered
-// so its flush can be given an explicit alignment.
-void sprite(unsigned char *m, const recomp_context &caller, unsigned id, float x, float y,
-            float sx, float sy, unsigned flags, std::initializer_list<unsigned> unit_scales) {
+// with its view's origin so its flush can be given an explicit alignment.
+void sprite(unsigned char *m, const recomp_context &caller, unsigned view, unsigned id, float x,
+            float y, float sx, float sy, unsigned flags, std::initializer_list<unsigned> unit_scales) {
     const unsigned buffer = word(m, sprite_buffer), index = half(m, sprite_counts + buffer * 2);
     Call call(m, caller);
     call.ctx.r4 = guest_address(word(m, sprite_asset));
@@ -166,8 +200,10 @@ void sprite(unsigned char *m, const recomp_context &caller, unsigned id, float x
         call.arg(offset, 1.0f);
     call.arg(0x44, flags);
     func_8001EB90(m, &call.ctx);
-    if (half(m, sprite_counts + buffer * 2) == index + 1 && queued.count < queued.records.size())
+    if (half(m, sprite_counts + buffer * 2) == index + 1 && queued.count < queued.records.size()) {
+        queued.views[queued.count] = view;
         queued.records[queued.count++] = sprite_pool + (buffer * sprite_capacity + index) * sprite_stride;
+    }
 }
 
 void weapon_box(unsigned char *m, const recomp_context &caller, unsigned view, unsigned rider,
@@ -197,17 +233,17 @@ void weapon_box(unsigned char *m, const recomp_context &caller, unsigned view, u
         call.arg(0x38, 0.5f * panel_scale);
         func_800795AC(m, &call.ctx);
         if (word(m, label_count) == label + 1)
-            rr64_hud_label_pin_center(m, label, view);
+            rr64_hud_label_pin_view(m, label, view);
     }
-    sprite(m, caller, 0x3D, x, y, sx, sy, 0, {0x24, 0x34, 0x38, 0x3C});
+    sprite(m, caller, view, 0x3D, x, y, sx, sy, 0, {0x24, 0x34, 0x38, 0x3C});
     if (counted)
-        sprite(m, caller, (weapon + 0xA3) & 0xFFFFu, icon_x, y, sx, sy, 0x400,
+        sprite(m, caller, view, (weapon + 0xA3) & 0xFFFFu, icon_x, y, sx, sy, 0x400,
                {0x24, 0x28, 0x2C, 0x30, 0x34, 0x38, 0x3C});
     // Pickup indicator: steady while its timer is above 5, else blinking.
     const unsigned pickup = word(m, rider + 0x5D4);
     if (pickup && pickup < 0x100 &&
         (number(m, rider + 0x5D8) > 5.0f || word(m, frame_counter) % 10 < 5))
-        sprite(m, caller, half(m, pickup_sprites + pickup * 2), icon_x, y, sx * .5f, sy * .5f, 0,
+        sprite(m, caller, view, half(m, pickup_sprites + pickup * 2), icon_x, y, sx * .5f, sy * .5f, 0,
                {0x24, 0x28, 0x34});
 }
 } // namespace
@@ -252,13 +288,14 @@ extern "C" void rr64_quadrant_hud_draw(unsigned char *m, void *context) {
         const float y = ((view / 2) * view_units_y + panel_centre_y) * height / 240.0f;
         DisplayList dl{m, word(m, dl_cursor)};
         if (display_list_room(m, dl.cursor, dl_bytes_per_view)) {
-            dl.align_begin(width);
-            // Stock bar render state (323F0..324A4).
+            dl.align_begin(width, height, view);
+            // Stock bar render state (323F0..324A4), without the world depth
+            // compare/write bits (0x30), as the 1P/2P bar hooks clear them.
             dl.put(0xE7000000u, 0);
             dl.put(0xE3000A01u, 0);
             dl.put(0xFCFFFFFFu, 0xFFFDF6FBu);
             dl.put(0xD7000000u, 0x80008000u);
-            dl.put(0xE200001Cu, 0x00552230u);
+            dl.put(0xE200001Cu, 0x00552200u);
             dl.put(0xE2001D00u, 4);
             dl.put(0xEE000000u, 0x01000000u);
             bar(dl, health_ratio(m, rider, 0x310, 0x30C), 200.0f, x - 16 * sx, y - 8 * sy,
@@ -278,14 +315,15 @@ extern "C" void rr64_quadrant_hud_draw(unsigned char *m, void *context) {
 
 extern "C" void rr64_quadrant_hud_sprite_begin(unsigned char *m, unsigned record) {
     using namespace rr64::quadrant_hud;
-    if (queued.owner != m || queued.aligned ||
-        std::find(queued.records.begin(), queued.records.begin() + queued.count, record) ==
-            queued.records.begin() + queued.count)
+    const auto end = queued.records.begin() + queued.count;
+    const auto found = std::find(queued.records.begin(), end, record);
+    if (queued.owner != m || queued.aligned || found == end)
         return;
     DisplayList dl{m, word(m, dl_cursor)};
     if (!display_list_room(m, dl.cursor, align_begin_bytes + align_end_bytes))
         return;
-    dl.align_begin(word(m, screen_width));
+    dl.align_begin(word(m, screen_width), word(m, screen_height),
+                   queued.views[found - queued.records.begin()]);
     write_u32(m, dl_cursor, dl.cursor);
     queued.aligned = true;
 }

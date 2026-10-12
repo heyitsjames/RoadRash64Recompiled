@@ -36,12 +36,20 @@ from the view edge, centred 105 units down). Rank/status stays top left.
 RT64 in this project anchors unannotated rectangles in a view's upper-left or
 lower-left region to the screen edge (its automatic race-HUD placement). Applied
 per draw, that would split the panel: the box would move and the icon would
-not. Every panel draw therefore carries an explicit centre `SetRectAlign`,
-which keeps its authored 4:3 position and exempts it from that heuristic. The
-bars are wrapped directly in the display list; the queued box, icon and
-indicator are wrapped by hooks around each record in the sprite flush
-(`8001EF8C` at `1F19C`/`1F5CC`); the quantity label is pinned through
-`rr64_hud_label_pin_center`.
+not. Every panel draw therefore carries an explicit `SetRectAlign` for its
+view, which exempts it from that heuristic and keeps the whole panel together.
+With a widescreen window each split-screen column fills its half of the screen,
+so the origin follows the view's left edge: the screen's left edge (`0`) for the
+left column and the centre line (`512`) for the right, the same rule as the
+stock rank labels. Each draw also pushes a scissor clipped to its view with the
+same origins; without one, RT64 keeps the scissor in the centred 4:3 area and
+clips the left column's panel. The sprite flush can restore its full-screen
+scissor (`ED`) inside a record, so a `SetScissorAlign` with the view's origins
+and bounds turns that into the view clip too, and is reset afterwards. At 4:3 the origins have no effect. The bars are wrapped
+directly in the display list; the queued box, icon and indicator are wrapped by
+hooks around each record in the sprite flush (`8001EF8C` at `1F19C`/`1F5CC`);
+the quantity label is anchored and clipped to its view through
+`rr64_hud_label_pin_view`.
 
 Finished or busted riders (stock flag `sp+68+view*2`) get no panel, matching
 the stock HUD. Paused frames, a cleared HUD mask and a nearly full display list

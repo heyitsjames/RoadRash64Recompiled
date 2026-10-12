@@ -14,7 +14,7 @@ extern "C" {
 // display-list commands, sprites and label producer as the stock block.
 void rr64_quadrant_hud_draw(unsigned char *rdram, void *context);
 // Sprite flush (8001EF8C) per-record scope: gives this HUD's queued sprites
-// an explicit centre alignment so RT64's automatic HUD anchoring leaves the
+// their view's explicit alignment so RT64's automatic HUD anchoring leaves the
 // panel intact. Other records are untouched.
 void rr64_quadrant_hud_sprite_begin(unsigned char *rdram, unsigned record);
 void rr64_quadrant_hud_sprite_end(unsigned char *rdram);

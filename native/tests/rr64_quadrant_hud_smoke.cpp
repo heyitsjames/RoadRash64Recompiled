@@ -93,7 +93,7 @@ extern "C" void func_8001EB90(unsigned char *m, recomp_context *ctx) {
                        number(m, sp + 0x1C), number(m, sp + 0x20), word(m, sp + 0x44)});
     write_u16(m, 0x800BC9D0u, std::uint16_t(sprites.size() + 5));
 }
-extern "C" void rr64_hud_label_pin_center(unsigned char *, unsigned index, unsigned view) {
+extern "C" void rr64_hud_label_pin_view(unsigned char *, unsigned index, unsigned view) {
     pins.emplace_back(index, view);
 }
 extern "C" void func_800795AC(unsigned char *m, recomp_context *ctx) {
@@ -138,17 +138,48 @@ int main() {
     rr64_quadrant_hud_draw(m, &ctx);
     check(word(m, stack + 0x10) == 0xA5A5A5A5u, "caller argument area restored");
     const unsigned dl_end = word(m, dl_cursor);
-    check(dl_end == dl_base + 0x400 + 3 * 21 * 8, "three views of aligned bar commands appended");
+    check(dl_end == dl_base + 0x400 + 3 * 31 * 8, "three views of aligned bar commands appended");
     const auto near = [](unsigned value, float expected) {
         return std::fabs(float(value) - expected * 4) <= 1.0f;
     };
-    unsigned rects = 0, aligns = 0;
+    unsigned rects = 0, aligns = 0, scissors = 0, scissor_aligns = 0;
     for (unsigned a = dl_base + 0x400; a < dl_end; a += 8) {
         if (word(m, a) == 0x64000006u) {
-            // Centre origin while drawing, no origin afterwards.
-            check(word(m, a + 4) == (aligns % 2 ? 0x800800u : 0x200200u), "bar alignment origin");
-            check(word(m, a + 8) == (aligns % 2 ? 0u : 0xFD800000u), "bar alignment offset");
+            // The view's origin while drawing (left column 0, right column
+            // 512), no origin afterwards. Drawn views are 0, 1 and 3.
+            const bool right = aligns / 2 != 0;
+            check(word(m, a + 4) == (aligns % 2 ? 0x800800u : right ? 0x200200u : 0u),
+                  "bar alignment origin");
+            check(word(m, a + 8) == (aligns % 2 || !right ? 0u : 0xFD800000u),
+                  "bar alignment offset");
             ++aligns;
+            a += 8;
+            continue;
+        }
+        if (word(m, a) == 0x64000008u) {
+            // Standard scissors take the view's origins while drawing (bounds
+            // clamp to the view), then the default.
+            const unsigned view = scissor_aligns / 2 == 2 ? 3 : scissor_aligns / 2;
+            const unsigned col = view % 2, row = view / 2;
+            const bool reset = scissor_aligns % 2;
+            check(word(m, a + 4) == (reset ? 0x800800u : col ? 0x400200u : 0x200000u) &&
+                      word(m, a + 8) == 0u && word(m, a + 12) == 0u &&
+                      word(m, a + 16) == (reset ? 0u : (col * 640u) << 16 | row * 480u) &&
+                      word(m, a + 20) == (reset ? 0xFFFFFFFFu
+                                                : (col * 640u + 640u) << 16 | (row * 480u + 480u)),
+                  "bar scissor alignment");
+            ++scissor_aligns;
+            a += 16;
+            continue;
+        }
+        if (word(m, a) == 0x64000005u) {
+            // View scissor with matching origins: views 0, 1 and 3.
+            const unsigned view = scissors == 2 ? 3 : scissors, col = view % 2, row = view / 2;
+            check(word(m, a + 4) == (col ? (512u << 2) | (1024u << 14) : 512u << 14) &&
+                      // Each view edge is its origin, so the x offsets are zero.
+                      word(m, a + 8) == row * 480u && word(m, a + 12) == row * 480u + 480u,
+                  "bar scissor clipped to its view");
+            ++scissors;
             a += 8;
             continue;
         }
@@ -166,7 +197,8 @@ int main() {
         check(colour == (bike ? 0x00FF00FFu : 0x646400FFu), "bar fades red to green");
         ++rects;
     }
-    check(rects == 6 && aligns == 6, "rider and bike bar per drawn view, each aligned");
+    check(rects == 6 && aligns == 6 && scissors == 3 && scissor_aligns == 6,
+          "rider and bike bar per drawn view, each aligned and clipped");
 
     unsigned boxes = 0;
     for (const auto &s : sprites) {
@@ -197,15 +229,30 @@ int main() {
     rr64_quadrant_hud_sprite_begin(m, buffer0 + 4 * 76); // Earlier HUD sprite.
     rr64_quadrant_hud_sprite_end(m);
     check(word(m, dl_cursor) == dl_base + 0x800, "other sprites untouched");
-    rr64_quadrant_hud_sprite_begin(m, buffer0 + 5 * 76); // First panel sprite.
-    check(word(m, dl_cursor) == dl_base + 0x800 + 24 && word(m, dl_base + 0x808) == 0x64000006u &&
-              word(m, dl_base + 0x80C) == 0x200200u,
-          "panel sprite drawn with centre alignment");
+    rr64_quadrant_hud_sprite_begin(m, buffer0 + 5 * 76); // View 0's weapon box.
+    check(word(m, dl_cursor) == dl_base + 0x800 + 72 && word(m, dl_base + 0x808) == 0x64000006u &&
+              word(m, dl_base + 0x80C) == 0u && word(m, dl_base + 0x810) == 0u &&
+              word(m, dl_base + 0x818) == 0x64000017u && word(m, dl_base + 0x820) == 0x64000005u &&
+              word(m, dl_base + 0x824) == 512u << 14 && word(m, dl_base + 0x828) == 0u &&
+              word(m, dl_base + 0x82C) == 480u && word(m, dl_base + 0x830) == 0x64000008u &&
+              word(m, dl_base + 0x834) == 0x200000u && word(m, dl_base + 0x840) == 0u &&
+              word(m, dl_base + 0x844) == (640u << 16 | 480u),
+          "left-column panel sprite aligned and clipped to the screen's left edge");
     rr64_quadrant_hud_sprite_end(m);
-    check(word(m, dl_cursor) == dl_base + 0x800 + 40 && word(m, dl_base + 0x81C) == 0x800800u,
-          "alignment closed after the panel sprite");
+    check(word(m, dl_cursor) == dl_base + 0x800 + 120 && word(m, dl_base + 0x84C) == 0x800800u &&
+              word(m, dl_base + 0x858) == 0x64000018u && word(m, dl_base + 0x860) == 0x64000008u &&
+              word(m, dl_base + 0x864) == 0x800800u && word(m, dl_base + 0x874) == 0xFFFFFFFFu,
+          "alignment and scissor restored after the panel sprite");
     rr64_quadrant_hud_sprite_end(m);
-    check(word(m, dl_cursor) == dl_base + 0x800 + 40, "unmatched end is a no-op");
+    check(word(m, dl_cursor) == dl_base + 0x800 + 120, "unmatched end is a no-op");
+    rr64_quadrant_hud_sprite_begin(m, buffer0 + 7 * 76); // View 1's weapon box.
+    check(word(m, dl_base + 0x880) == 0x64000006u && word(m, dl_base + 0x884) == 0x200200u &&
+              word(m, dl_base + 0x888) == 0xFD800000u &&
+              word(m, dl_base + 0x89C) == (512u << 2 | 1024u << 14) &&
+              word(m, dl_base + 0x8AC) == 0x400200u && word(m, dl_base + 0x8B8) == 640u << 16 &&
+              word(m, dl_base + 0x8BC) == (1280u << 16 | 480u),
+          "right-column panel sprite aligned and clipped to the centre line");
+    rr64_quadrant_hud_sprite_end(m);
 
     // Pickup indicator follows the stock steady/blink rule.
     seed(m, ctx, 3);
